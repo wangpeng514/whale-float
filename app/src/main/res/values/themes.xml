@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.WhaleFloat" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <!-- 用系统原生主题，不依赖 appcompat -->
+    <style name="Theme.WhaleFloat" parent="@android:style/Theme.DeviceDefault.DayNight">
         <item name="android:windowBackground">#0E1B2A</item>
     </style>
 </resources>

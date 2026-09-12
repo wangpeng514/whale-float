@@ -1,6 +1,7 @@
 package com.dsh.whalefloat;
 
 import android.Manifest;
+import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -13,15 +14,14 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.ContextCompat;
-
 /**
  * 配置界面：填 API Key、设刷新间隔、开关悬浮窗。
  * 悬浮窗本身由 {@link FloatingWhaleService} 以 specialUse 前台服务维持。
+ *
+ * 继承系统 Activity（而不是 AppCompatActivity）：本工程刻意不依赖 androidx，
+ * 这样构建时不需要任何第三方依赖，避免 Kotlin 标准库重复类（Duplicate class）的编译错误。
  */
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends Activity {
 
     static final String PREFS = "whale";
     static final String KEY_API = "api_key";
@@ -118,14 +118,18 @@ public class MainActivity extends AppCompatActivity {
                     Uri.parse("package:" + getPackageName())));
             return;
         }
-        ContextCompat.startForegroundService(this, new Intent(this, FloatingWhaleService.class));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(new Intent(this, FloatingWhaleService.class));
+        } else {
+            startService(new Intent(this, FloatingWhaleService.class));
+        }
         prefs.edit().putBoolean(KEY_RUNNING, true).apply();
         render();
     }
 
     private void requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= 33
-                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
         }
@@ -144,8 +148,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
-                                          @NonNull int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                          int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         render();
     }

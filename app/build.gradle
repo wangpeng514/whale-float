@@ -25,6 +25,6 @@ android {
     }
 }
 
-dependencies {
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-}
+// 不引入任何第三方依赖：纯 Java + 系统原生控件。
+// （appcompat 会拉入 kotlin-stdlib，与 kotlin-stdlib-jdk7/jdk8 产生 Duplicate class 编译错误）
+dependencies { }
