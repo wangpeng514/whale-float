@@ -44,6 +44,15 @@
         android:textSize="16sp"
         android:textStyle="bold" />
 
+    <!-- 引擎状态小圆点：绿色=DSH 引擎在线（数据来自 DSH），隐藏=直连模式 -->
+    <View
+        android:id="@+id/engineDot"
+        android:layout_width="12dp"
+        android:layout_height="12dp"
+        android:layout_gravity="top|end"
+        android:background="@drawable/dot_engine"
+        android:visibility="gone" />
+
     <!-- 鲸鱼本体（作者 DSniang1.png 的 cut-out） -->
     <ImageView
         android:id="@+id/whale"
