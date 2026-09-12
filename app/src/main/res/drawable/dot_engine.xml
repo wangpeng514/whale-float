@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 引擎状态小圆点：绿色描边 + 浅绿填充，表示 DSH 引擎在线 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#6BE39B" />
+    <stroke android:width="1.5dp" android:color="#1E7A46" />
+</shape>
