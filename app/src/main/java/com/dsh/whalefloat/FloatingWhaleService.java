@@ -38,7 +38,11 @@ import java.util.concurrent.Executors;
 /**
  * 悬浮余额鲸鱼。
  *
- * 数据来源：App 自己直连 https://api.deepseek.com/user/balance（不依赖 DSH，DSH 关着也能用）。
+ * 数据来源（混合式，优先联动 DSH）：
+ *   1. 先读 DSH 引擎在本机开的接口 http://127.0.0.1:3080/dsh-whale/balance.json —— 能拿到
+ *      「今日已用」和「峰谷时段」，数字与 DSH 网页挂件完全一致；此时显示绿色引擎状态点。
+ *   2. DSH 没开 / 接口失败时，回退到 App 自己直连 https://api.deepseek.com/user/balance，
+ *      只显示余额（该接口不返回用量），状态点隐藏。
  * 窗口：TYPE_APPLICATION_OVERLAY，靠 specialUse 前台服务保活，进程被回收后系统会带 null
  * intent 重启服务（见 onStartCommand 里的 recreate 分支）。
  */
@@ -47,10 +51,13 @@ public class FloatingWhaleService extends Service {
     private static final String CHANNEL_ID = "whale_overlay";
     private static final int NOTIF_ID = 1001;
     private static final String BALANCE_URL = "https://api.deepseek.com/user/balance";
+    /** DSH 引擎侧的余额接口（由 dsh-whale-widget 插件提供，比官方接口多出今日已用/峰谷）。 */
+    private static final String DSH_BALANCE_URL = "http://127.0.0.1:3080/dsh-whale/balance.json";
 
     private WindowManager wm;
     private View root;
     private TextView bubble;
+    private View dot;
     private WindowManager.LayoutParams lp;
     private SharedPreferences prefs;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -59,6 +66,8 @@ public class FloatingWhaleService extends Service {
     /** 最近一次成功的余额，网络抖动时继续显示它，不闪错误。 */
     private volatile Double lastBalance = null;
     private volatile String lastCurrency = null;
+    /** 最近一次数据是否来自 DSH（决定状态点显示与气泡文案）。 */
+    private volatile boolean fromDsh = false;
     private volatile boolean shown = false;
 
     private final Runnable refreshTask = new Runnable() {
@@ -121,6 +130,7 @@ public class FloatingWhaleService extends Service {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         root = LayoutInflater.from(this).inflate(R.layout.overlay_whale, null);
         bubble = root.findViewById(R.id.bubble);
+        dot = root.findViewById(R.id.engineDot);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -239,43 +249,119 @@ public class FloatingWhaleService extends Service {
         return sec * 1000;
     }
 
+    /** 余额数据统一入口：先试 DSH（数据更全），失败再直连 DeepSeek。 */
     private void refresh() {
-        // 首次刷新且还没有数据时先给个占位，避免空白
         if (!shown) return;
         if (lastBalance == null) setBubble("…");
         final String key = prefs.getString(MainActivity.KEY_API, "");
-        if (key == null || key.trim().isEmpty()) {
-            setBubble("未配置 API Key");
-            return;
-        }
         io.execute(() -> {
             try {
-                String[] r = fetchBalance(key.trim());
-                lastBalance = Double.parseDouble(r[0]);
-                lastCurrency = r[1];
-                final String text = format(lastBalance, lastCurrency);
-                handler.post(() -> setBubble(text));
-            } catch (Exception e) {
-                handler.post(() -> {
-                    if (lastBalance != null) {
-                        setBubble(format(lastBalance, lastCurrency)); // 沿用上次值
-                    } else {
-                        setBubble("读余额失败：" + shortMsg(e));
-                    }
-                });
+                apply(fetchFromDsh(), true);
+                return;
+            } catch (Exception dshErr) {
+                // DSH 没开或没装插件：退化成直连，只显示余额
+                if (key == null || key.trim().isEmpty()) {
+                    handler.post(() -> setBubble(lastBalance != null
+                            ? format(lastBalance, lastCurrency)
+                            : "未配置 API Key"));
+                    return;
+                }
+                try {
+                    apply(fetchFromDirect(key.trim()), false);
+                } catch (Exception directErr) {
+                    handler.post(() -> setBubble(lastBalance != null
+                            ? format(lastBalance, lastCurrency) // 网络抖动：沿用上次数字
+                            : "读余额失败：" + shortMsg(directErr)));
+                }
             }
         });
     }
 
-    /** @return [金额, 币种]；多币种时优先 CNY 且非零，其次任意非零，再退回 CNY，最后第一项。 */
-    private String[] fetchBalance(String key) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(BALANCE_URL).openConnection();
+    /** 把一次成功的结果写进界面状态：余额、来源、气泡文案、状态点。 */
+    private void apply(Balance b, boolean fromDshSource) {
+        lastBalance = b.amount;
+        lastCurrency = b.currency;
+        fromDsh = fromDshSource;
+        final String text = format(b.amount, b.currency)
+                + (b.todayUsage != null
+                    ? " · 今日 ¥" + String.format(java.util.Locale.US, "%.2f", b.todayUsage)
+                      + (Boolean.TRUE.equals(b.isPeak) ? " 高峰" : " 空闲")
+                    : "");
+        handler.post(() -> {
+            setBubble(text);
+            if (dot != null) dot.setVisibility(fromDshSource ? View.VISIBLE : View.GONE);
+        });
+    }
+
+    /** 一次余额观测结果。todayUsage / isPeak 只有 DSH 接口能给，直连时为 null。 */
+    private static final class Balance {
+        final double amount;
+        final String currency;
+        final Double todayUsage;
+        final Boolean isPeak;
+
+        Balance(double amount, String currency, Double todayUsage, Boolean isPeak) {
+            this.amount = amount;
+            this.currency = currency;
+            this.todayUsage = todayUsage;
+            this.isPeak = isPeak;
+        }
+    }
+
+    /** 读 DSH 插件的余额接口。超时故意设短：DSH 没开时不要拖慢回退。 */
+    private Balance fetchFromDsh() throws Exception {
+        JSONObject o = getJson(DSH_BALANCE_URL, null, 2500, 3000);
+        if (!o.optBoolean("ok", false)) throw new Exception("DSH 未就绪");
+        String currency = o.optString("currency", "CNY");
+        return new Balance(o.optDouble("total_balance", o.optDouble("totalBalance", 0)), currency,
+                o.has("todayUsage") ? o.optDouble("todayUsage", 0) : null,
+                o.has("isPeak") ? o.optBoolean("isPeak", false) : null);
+    }
+
+    /** 直连 DeepSeek 官方余额接口；多币种时优先 CNY 且非零，其次任意非零，再退回 CNY，最后第一项。 */
+    private Balance fetchFromDirect(String key) throws Exception {
+        JSONObject o = getJson(BALANCE_URL, key, 15000, 20000);
+        JSONArray infos = o.optJSONArray("balance_infos");
+        if (infos == null || infos.length() == 0) throw new Exception("返回结构异常");
+        JSONObject pick = null;
+        for (int i = 0; i < infos.length(); i++) {
+            JSONObject it = infos.getJSONObject(i);
+            if ("CNY".equals(it.optString("currency")) && it.optDouble("total_balance", 0) > 0) {
+                pick = it;
+                break;
+            }
+        }
+        if (pick == null) {
+            for (int i = 0; i < infos.length(); i++) {
+                JSONObject it = infos.getJSONObject(i);
+                if (it.optDouble("total_balance", 0) > 0) {
+                    pick = it;
+                    break;
+                }
+            }
+        }
+        if (pick == null) {
+            for (int i = 0; i < infos.length(); i++) {
+                if ("CNY".equals(infos.getJSONObject(i).optString("currency"))) {
+                    pick = infos.getJSONObject(i);
+                    break;
+                }
+            }
+        }
+        if (pick == null) pick = infos.getJSONObject(0);
+        return new Balance(pick.optDouble("total_balance", 0),
+                pick.optString("currency", "CNY"), null, null);
+    }
+
+    /** 发一个 GET 并把响应体解析成 JSON。key 为 null 时不带 Authorization。 */
+    private JSONObject getJson(String url, String key, int connectMs, int readMs) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         try {
             c.setRequestMethod("GET");
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(20000);
-            c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setConnectTimeout(connectMs);
+            c.setReadTimeout(readMs);
             c.setRequestProperty("Accept", "application/json");
+            if (key != null) c.setRequestProperty("Authorization", "Bearer " + key);
             int code = c.getResponseCode();
             if (code != 200) throw new Exception("HTTP " + code);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -287,38 +373,7 @@ public class FloatingWhaleService extends Service {
                 if (bos.size() > 200000) break;
             }
             in.close();
-            JSONObject o = new JSONObject(bos.toString("UTF-8"));
-            JSONArray infos = o.optJSONArray("balance_infos");
-            if (infos == null || infos.length() == 0) throw new Exception("返回结构异常");
-            JSONObject pick = null;
-            for (int i = 0; i < infos.length(); i++) {
-                JSONObject it = infos.getJSONObject(i);
-                if ("CNY".equals(it.optString("currency")) && it.optDouble("total_balance", 0) > 0) {
-                    pick = it;
-                    break;
-                }
-            }
-            if (pick == null) {
-                for (int i = 0; i < infos.length(); i++) {
-                    JSONObject it = infos.getJSONObject(i);
-                    if (it.optDouble("total_balance", 0) > 0) {
-                        pick = it;
-                        break;
-                    }
-                }
-            }
-            if (pick == null) {
-                for (int i = 0; i < infos.length(); i++) {
-                    if ("CNY".equals(infos.getJSONObject(i).optString("currency"))) {
-                        pick = infos.getJSONObject(i);
-                        break;
-                    }
-                }
-            }
-            if (pick == null) pick = infos.getJSONObject(0);
-            String currency = pick.optString("currency", "CNY");
-            double amount = pick.optDouble("total_balance", 0);
-            return new String[]{String.valueOf(amount), currency};
+            return new JSONObject(bos.toString("UTF-8"));
         } finally {
             c.disconnect();
         }
